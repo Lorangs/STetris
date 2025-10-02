@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "input.h": "c",
+        "types.h": "c",
+        "poll.h": "c"
+    }
+}
