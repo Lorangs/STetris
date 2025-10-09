@@ -5,6 +5,11 @@
         "poll.h": "c",
         "string.h": "c",
         "dirent.h": "c",
-        "fb.h": "c"
+        "fb.h": "c",
+        "limits.h": "c",
+        "mman.h": "c",
+        "fcntl.h": "c",
+        "unistd.h": "c",
+        "ctype.h": "c"
     }
 }

@@ -1,3 +1,10 @@
+#define _GNU_SOURCE
+#define DEV_INPUT_EVENT "/dev/input"
+#define EVENT_DEV_NAME "event"
+#define DEV_FB "/dev"
+#define FB_DEV_NAME "fb"
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -9,17 +16,39 @@
 #include <time.h>
 #include <poll.h>
 
+
+#include <linux/fb.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <inttypes.h>
+#include <signal.h>
+#include <limits.h>
+
 // The game state can be used to detect what happens on the playfield
 #define GAMEOVER 0
 #define ACTIVE (1 << 0)
 #define ROW_CLEAR (1 << 1)
 #define TILE_ADDED (1 << 2)
 
+typedef enum color_t {
+    red = 0xF800,
+    green = 0x07E0,
+    blue = 0x001F,
+    magenta = 0xF81F,
+    cyan = 0x07FF,
+    yellow = 0xFFE0,
+    black = 0x0000,
+    white = 0xFFFF,
+} color;
+
 // If you extend this structure, either avoid pointers or adjust
 // the game logic allocate/deallocate and reset the memory
 typedef struct
 {
     bool occupied;
+    color tile_color;
 } tile;
 
 typedef struct
@@ -27,6 +56,32 @@ typedef struct
     unsigned int x;
     unsigned int y;
 } coord;
+
+
+
+// Array of available tile colors (excluding black and white for better visibility)
+static const color tile_colors[] = {red, green, blue, magenta, cyan, yellow};
+static const int num_tile_colors = sizeof(tile_colors) / sizeof(tile_colors[0]);
+
+// Function to get a random color for new tiles
+color getRandomTileColor() {
+    return tile_colors[rand() % num_tile_colors];
+}
+
+// Function to convert colors to ASCII characters for console display
+char colorToChar(color tile_color) {
+    switch (tile_color) {
+        case red:     return '@';  // Red blocks - solid circle
+        case green:   return '#';  // Green blocks - hash
+        case blue:    return '*';  // Blue blocks - asterisk
+        case magenta: return '%';  // Magenta blocks - percent
+        case cyan:    return '&';  // Cyan blocks - ampersand
+        case yellow:  return '$';  // Yellow blocks - dollar
+        case black:   return ' ';  // Empty space
+        case white:   return 'O';  // White/default - capital O
+        default:      return '?';  // Unknown color
+    }
+}
 
 typedef struct
 {
@@ -51,6 +106,12 @@ typedef struct
                                 // lowers with increasing level, never reaches 0
 } gameConfig;
 
+struct fb_t {
+    uint16_t pixel[8][8];
+};
+
+
+// Initial game configuration
 gameConfig game = {
     .grid = {8, 8},
     .uSecTickTime = 10000,
@@ -58,18 +119,183 @@ gameConfig game = {
     .initNextGameTick = 50,
 };
 
+
+struct fb_t *fb = NULL;    // Pointer to framebuffer memory
+int fbfd = 0; // framebuffer file descriptor
+
+// Poll structure for event device (joystick)
+struct pollfd evpoll = {
+    .events = POLLIN,
+};
+
+// Global variable to store original terminal settings
+struct termios original_ttystate;
+
+/**
+ * Restore terminal to original settings
+ */
+void restoreTerminal() {
+    tcsetattr(STDIN_FILENO, TCSANOW, &original_ttystate);
+    printf("\n"); // Add a newline for clean exit
+    fflush(stdout);
+}
+
+/**
+ * Signal handler for clean exit
+ */
+void signalHandler(int sig) {
+    switch(sig) {
+        case SIGINT:
+            printf("\nReceived Ctrl+C, exiting gracefully...\n");
+            break;
+        case SIGQUIT:
+            printf("\nReceived quit signal (Ctrl+\\), exiting...\n");
+            break;
+        case SIGTERM:
+            printf("\nReceived termination signal, cleaning up...\n");
+            break;
+        default:
+            printf("\nReceived signal %d, exiting...\n", sig);
+    }
+    restoreTerminal();
+    exit(0);
+}
+
+/**
+ * Checks if the given directory entry is a framebuffer device.
+ */
+static int is_framebuffer_device(const struct dirent *dir)
+{
+    return strncmp(FB_DEV_NAME, dir->d_name, strlen(FB_DEV_NAME)-1) == 0;
+}
+
+/**
+ * Checks if the given directory entry is an event device.
+ */
+static int is_event_device(const struct dirent *dir)
+{
+    return strncmp(EVENT_DEV_NAME, dir->d_name, strlen(EVENT_DEV_NAME)-1) == 0;
+}
+
+/**
+ * Opens the framebuffer device with the given name.
+ */
+static int open_fbdev(const char *dev_name)
+{
+
+    struct dirent **namelist; // list of directory entries
+    int i, ndev;            // number of devices found
+    int fd = -1;            // file descriptor to return
+    struct fb_fix_screeninfo fix_info;  // fixed screen info structure
+
+    ndev = scandir(DEV_FB, &namelist, is_framebuffer_device, versionsort);  // scan for framebuffer devices
+    if (ndev <= 0)
+        return ndev;
+
+    // iterate over all devices found
+    for (i = 0; i < ndev; i++)
+    {
+        char fname[PATH_MAX];     // filename buffer
+        snprintf(fname, sizeof(fname), "%s/%s", DEV_FB, namelist[i]->d_name);   // construct full path
+        fd = open(fname, O_RDWR);        // open device with read/write access
+        // if open failed, try next device
+        if (fd < 0)
+            continue;
+        ioctl(fd, FBIOGET_FSCREENINFO, &fix_info); // load fixed screen info into fix_info structure
+        if (strcmp(dev_name, fix_info.id) == 0)  // Check device name to match for desired device (Sense HAT FB)
+            break;
+        close(fd);  // close device if not the desired one
+        fd = -1;    // reset file descriptor
+    }
+    for (i = 0; i < ndev; i++)
+        free(namelist[i]); // free allocated memory for directory entries
+    
+    return fd;  // return file descriptor of the opened device or -1 if not found
+}
+
+/**
+ * Opens the event device with the given name.
+ */
+static int open_evdev(const char *dev_name)
+{
+    struct dirent **namelist;       // list of directory entries
+    int i, ndev;                    // number of devices found
+    int fd = -1;                    // file descriptor to return
+
+    // scan for event devices, sorted by version
+    ndev = scandir(DEV_INPUT_EVENT, &namelist, is_event_device, versionsort);
+    if (ndev <= 0)
+        return ndev;    // return errormessage if no devices found
+
+    // iterate over all devices found
+    for (i = 0; i < ndev; i++)
+    {
+        char fname[PATH_MAX];
+        char name[256];
+
+        // construct full path to device
+        snprintf(fname, sizeof(fname), "%s/%s", DEV_INPUT_EVENT, namelist[i]->d_name);
+        
+        // open device with read-only access
+        fd = open(fname, O_RDONLY);
+        if (fd < 0)
+            continue;   // if open failed, try next device
+        
+        // get device name
+        ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+        if (strcmp(dev_name, name) == 0)
+            break;  // if device name matches, break loop and keep fd
+        close(fd);
+        fd = -1;
+    }
+    // free allocated memory for directory entries
+    for (i = 0; i < ndev; i++)
+        free(namelist[i]);
+
+    return fd;
+}
+
+
 // This function is called on the start of your application
 // Here you can initialize what ever you need for your task
 // return false if something fails, else true
 bool initializeSenseHat()
 {
-    return true;
+    bool ret = true;
+    fbfd = open_fbdev("RPi-Sense FB");  // open framebuffer device
+    if (fbfd <= 0) {
+        ret = false;
+        fprintf(stderr, "ERROR: cannot open framebuffer device. ErrorCode:\t%i\n", fbfd);
+    }
+
+    fb = mmap(0, 128, PROT_READ | PROT_WRITE, MAP_SHARED, fbfd, 0); // memory map the framebuffer
+    if (fb == MAP_FAILED) {
+        ret = false;
+        fprintf(stderr, "ERROR: Failed to mmap framebuffer.\n");
+        fb = NULL;
+    }
+    if (fb) {
+        memset(fb, 0, 128); // set all pixels to 0 (black)
+    }
+
+    evpoll.fd = open_evdev("Raspberry Pi Sense HAT Joystick"); // open event device
+    if (evpoll.fd < 0) {
+        ret = false;
+        fprintf(stderr, "ERROR: Event device not found.\n");
+    }
+    return ret;
 }
 
 // This function is called when the application exits
 // Here you can free up everything that you might have opened/allocated
 void freeSenseHat()
 {
+    if (fb)
+        munmap(fb, 128); // unmap framebuffer memory
+    if (fbfd > 0)
+        close(fbfd); // close framebuffer file descriptor
+    if (evpoll.fd >= 0)
+        close(evpoll.fd); // close event device file descriptor
 }
 
 // This function should return the key that corresponds to the joystick press
@@ -78,6 +304,40 @@ void freeSenseHat()
 // !!! when nothing was pressed you MUST return 0 !!!
 int readSenseHatJoystick()
 {
+    struct input_event ev[64];
+    int i, rd;
+
+    // Check if input is available using poll (non-blocking)
+    if (poll(&evpoll, 1, 0) <= 0) {
+        return 0; // No input available
+    }
+
+    rd = read(evpoll.fd, ev, sizeof(struct input_event) * 64);
+    if (rd < (int) sizeof(struct input_event)) {
+        // No complete event available, not an error
+        return 0;
+    }
+    
+    for (i = 0; i < (int)(rd / sizeof(struct input_event)); i++) {
+        if (ev[i].type != EV_KEY)
+            continue;
+        if (ev[i].value != 1)
+            continue;
+        switch (ev[i].code) {
+            case KEY_ENTER:
+                return KEY_ENTER;
+            case KEY_UP:
+                return KEY_UP;
+            case KEY_DOWN:
+                return KEY_DOWN;
+            case KEY_RIGHT:
+                return KEY_RIGHT;
+            case KEY_LEFT:
+                return KEY_LEFT;
+            default: 
+                break;
+        }
+    }               
     return 0;
 }
 
@@ -86,7 +346,9 @@ int readSenseHatJoystick()
 // has changed the playfield
 void renderSenseHatMatrix(bool const playfieldChanged)
 {
+    // Console version: No LED matrix rendering needed
     (void)playfieldChanged;
+    return;
 }
 
 // The game logic uses only the following functions to interact with the playfield.
@@ -96,6 +358,7 @@ void renderSenseHatMatrix(bool const playfieldChanged)
 static inline void newTile(coord const target)
 {
     game.playfield[target.y][target.x].occupied = true;
+    game.playfield[target.y][target.x].tile_color = getRandomTileColor();
 }
 
 static inline void copyTile(coord const to, coord const from)
@@ -377,7 +640,11 @@ void renderConsole(bool const playfieldChanged)
         for (unsigned int x = 0; x < game.grid.x; x++)
         {
             coord const checkTile = {x, y};
-            fprintf(stdout, "%c", (tileOccupied(checkTile)) ? '#' : ' ');
+            if (tileOccupied(checkTile)) {
+                fprintf(stdout, "%c", colorToChar(game.playfield[y][x].tile_color));
+            } else {
+                fprintf(stdout, " ");
+            }
         }
         switch (y)
         {
@@ -404,6 +671,8 @@ void renderConsole(bool const playfieldChanged)
     {
         fprintf(stdout, "-");
     }
+    
+
     fflush(stdout);
 }
 
@@ -416,16 +685,23 @@ int main(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    // This sets the stdin in a special state where each
-    // keyboard press is directly flushed to the stdin and additionally
-    // not outputted to the stdout
-    {
-        struct termios ttystate;
-        tcgetattr(STDIN_FILENO, &ttystate);
-        ttystate.c_lflag &= ~(ICANON | ECHO);
-        ttystate.c_cc[VMIN] = 1;
-        tcsetattr(STDIN_FILENO, TCSANOW, &ttystate);
-    }
+    
+    // Initialize random seed for tile colors
+    srand(time(NULL));
+    
+    // Save original terminal settings
+    tcgetattr(STDIN_FILENO, &original_ttystate);
+    
+    // Set up signal handlers for clean exit
+    signal(SIGINT, signalHandler);   // Ctrl+C
+    signal(SIGTERM, signalHandler);  // Termination signal
+    
+    // Set up terminal for raw input mode
+    struct termios ttystate;
+    tcgetattr(STDIN_FILENO, &ttystate);
+    ttystate.c_lflag &= ~(ICANON | ECHO);
+    ttystate.c_cc[VMIN] = 1;
+    tcsetattr(STDIN_FILENO, TCSANOW, &ttystate);
 
     // Allocate the playing field structure
     game.rawPlayfield = (tile *)malloc(game.grid.x * game.grid.y * sizeof(tile));
@@ -440,42 +716,30 @@ int main(int argc, char **argv)
         game.playfield[y] = &(game.rawPlayfield[y * game.grid.x]);
     }
 
-    // Reset playfield to make it empty
-    resetPlayfield();
-    // Start with gameOver
-    gameOver();
+ 
+    resetPlayfield();   // Reset playfield to make it empty
+    gameOver(); // Start with gameOver
 
-    if (!initializeSenseHat())
-    {
-        fprintf(stderr, "ERROR: could not initilize sense hat\n");
-        return 1;
-    };
 
     // Clear console, render first time
     fprintf(stdout, "\033[H\033[J");
+    printf("STetris Console Version\n");
+    printf("Controls: Arrow keys to move, Enter to exit\n");
+    printf("Press any key to start!\n\n");
     renderConsole(true);
-    renderSenseHatMatrix(true);
 
     while (true)
     {
         struct timeval sTv, eTv;
         gettimeofday(&sTv, NULL);
 
-        int key = readSenseHatJoystick();
-        if (!key)
-        {
-            // NOTE: Uncomment the next line if you want to test your implementation with
-            // reading the inputs from stdin. However, we expect you to read the inputs directly
-            // from the input device and not from stdin (you should implement the readSenseHatJoystick
-            // method).
-             key = readKeyboard();
-        }
+        // Console version: Use keyboard input only
+        int key = readKeyboard();
         if (key == KEY_ENTER)
             break;
 
         bool playfieldChanged = sTetris(key);
         renderConsole(playfieldChanged);
-        renderSenseHatMatrix(playfieldChanged);
 
         // Wait for next tick
         gettimeofday(&eTv, NULL);
@@ -486,8 +750,14 @@ int main(int argc, char **argv)
         }
         game.tick = (game.tick + 1) % game.nextGameTick;
     }
+    fprintf(stdout, "\033[H\033[J");
+    fprintf(stdout, "\nExiting STetris Console Version\n");
+    fflush(stdout);
 
-    freeSenseHat();
+    // Restore terminal settings before exit
+    restoreTerminal();
+    
+    // Console version doesn't need Sense HAT cleanup
     free(game.playfield);
     free(game.rawPlayfield);
 
