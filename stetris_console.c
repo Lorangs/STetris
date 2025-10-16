@@ -640,7 +640,6 @@ int main(int argc, char **argv)
 
         bool playfieldChanged = sTetris(key);
         renderConsole(playfieldChanged);
-        renderSenseHatMatrix(playfieldChanged);
 
         // Wait for next tick
         gettimeofday(&eTv, NULL);
