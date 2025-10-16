@@ -3,7 +3,7 @@
  * @author Lorang Strand
  * @date 2025-10-09
  * @brief A Tetris clone for Raspberry Pi with Sense HAT and console output.
- * @version 0.1
+ * @version 1.0
  * This file is part of the Stetris project.
  * It implements a Tetris clone that can run on a Raspberry Pi with Sense HAT
  * or in a console. The game logic is the same for both versions, but the input
@@ -14,32 +14,48 @@
  */
 
 
-#define _GNU_SOURCE         
-#define DEV_FB "/dev"       // Framebuffer device directory
-#define FB_DEV_NAME "fb"    // Framebuffer device name prefix
+#define _GNU_SOURCE                     // Enables scandir() and versionsort() 
+#define DEV_FB          "/dev"          // Framebuffer device directory
+#define FB_DEV_NAME     "fb"            // Framebuffer device name prefix
 #define DEV_INPUT_EVENT "/dev/input"    // Input event device directory (for joystick)
-#define EVENT_DEV_NAME "event"          // Input event device name prefix (for joystick)
-#define BLOCK_COLOR red     // Color for the blocks in the game
+#define EVENT_DEV_NAME  "event"         // Input event device name prefix (for joystick)
+#define BLOCK_COLOR     red             // Color for the blocks in the game
 
-#include <stdbool.h>    // for bool type
-#include <linux/fb.h>   // for framebuffer structures
-#include <linux/input.h>// for input event structures
-#include <dirent.h>     // for scandir()
-#include <fcntl.h>      // for open()
-#include <inttypes.h>   // for inttypes macros
-#include <limits.h>     // for PATH_MAX
-#include <stdio.h>      // for printf(), snprintf()
-#include <stdlib.h>     // for malloc(), free(), exit()
-#include <unistd.h>     // for close(), read(), write()
-#include <sys/select.h> // for select()
-#include <string.h>     // for strncmp, strcmp, strlen
-#include <sys/mman.h>   // for mmap (memory mapping)
-#include <time.h>       // for nanosleep
-#include <poll.h>       // for non-blocking input handling
-#include <termios.h>    // for console input handling
-#include <signal.h>     // for signal handling
+#include <stdbool.h>                    // for bool type
+#include <linux/fb.h>                   // for framebuffer structures
+#include <linux/input.h>                // for input event structures
+#include <dirent.h>                     // for scandir()
+#include <fcntl.h>                      // for open()
+#include <inttypes.h>                   // for inttypes macros
+#include <limits.h>                     // for PATH_MAX
+#include <stdio.h>                      // for printf(), snprintf()
+#include <stdlib.h>                     // for malloc(), free(), exit()
+#include <unistd.h>                     // for close(), read(), write()
+#include <sys/select.h>                 // for select()
+#include <string.h>                     // for strncmp, strcmp, strlen
+#include <sys/mman.h>                   // for mmap (memory mapping)
+#include <time.h>                       // for nanosleep
+#include <poll.h>                       // for non-blocking input handling
+#include <termios.h>                    // for console input handling
+#include <signal.h>                     // for signal handling
 
-// The game state can be used to detect what happens on the playfield
+/**
+ * Game state bit field definitions.
+ * These can be combined using bitwise OR to represent multiple states.'
+ * 
+ * Structure of game.state:
+ * Bit Position:  7 6 5 4 3 2 1 0
+ *                │ │ │ │ │ │ │ │
+ *                │ │ │ │ │ │ │ └─ ACTIVE       (bit 0)
+ *                │ │ │ │ │ │ └─── ROW_CLEAR    (bit 1)
+ *                │ │ │ │ │ └───── TILE_ADDED   (bit 2)
+ *                │ │ │ │ └─────── (unused)
+ *                │ │ │ └───────── (unused)
+ *                │ │ └─────────── (unused)
+ *                │ └───────────── (unused)
+ *                └─────────────── (unused)
+ * 
+ */
 #define GAMEOVER 0
 #define ACTIVE (1 << 0)
 #define ROW_CLEAR (1 << 1)
@@ -103,8 +119,8 @@ struct fb_t {
     uint16_t pixel[8][8];
 };
 
-struct fb_t *fb = NULL;    // Pointer to framebuffer memory
-int fbfd = 0; // framebuffer file descriptor
+struct fb_t *fb = NULL;     // Pointer to framebuffer memory
+int fbfd = 0;               // framebuffer file descriptor
 
 // Poll structure for event device (joystick)
 struct pollfd evpoll = {
@@ -117,13 +133,14 @@ struct termios old_termios, new_termios;
 
 // Function prototypes
 void cleanUp();
-void interrupt_handler(int signum);
-static int is_event_device(const struct dirent *dir);
-static int is_framebuffer_device(const struct dirent *dir);
-static int open_fbdev(const char *dev_name);
-static int open_evdev(const char *dev_name);
+void interuptHandler(int signum);
+static int isEventDevice(const struct dirent *dir);
+static int isFramebufferDevice(const struct dirent *dir);
+static int openFbdev(const char *dev_name);
+static int openEvdev(const char *dev_name);
 void initializeSenseHat();
 int readJoystick(struct input_event *ev);
+int readKeyboard();
 void resetGame();
 void drawPlayfield();
 void drawPixel(unsigned int x, unsigned int y, color_t color);
@@ -137,55 +154,82 @@ void placeTile();
 bool clearFullRows();
 void gameTick();
 void gameLoop();
+void renderSenseHatMatrix(bool const playfieldChanged);
+void renderConsole(bool const playfieldChanged);
+bool sTetris(int const key);
 
 
-// The game logic uses only the following functions to interact with the playfield.
-// if you choose to change the playfield or the tile structure, you might need to
-// adjust this game logic <> playfield interface
-
+/**
+ * Creates a new tile at the specified coordinates by marking the tile as occupied.
+ */
 static inline void newTile(coord const target)
 {
     game.playfield[target.y][target.x].occupied = true;
 }
 
+/**
+ * Copies the tile from one coordinate to another.
+ */
 static inline void copyTile(coord const to, coord const from)
 {
     memcpy((void *)&game.playfield[to.y][to.x], (void *)&game.playfield[from.y][from.x], sizeof(tile));
 }
 
+/**
+ * Copies an entire row from one index to another.
+ */
 static inline void copyRow(unsigned int const to, unsigned int const from)
 {
     memcpy((void *)&game.playfield[to][0], (void *)&game.playfield[from][0], sizeof(tile) * game.grid.x);
 }
 
+/**
+ * Resets the tile at the specified coordinates by marking it as unoccupied.
+ */
 static inline void resetTile(coord const target)
 {
     memset((void *)&game.playfield[target.y][target.x], 0, sizeof(tile));
 }
 
+/**
+ * Resets an entire row at the specified index by marking all tiles as unoccupied.
+ */
 static inline void resetRow(unsigned int const target)
 {
     memset((void *)&game.playfield[target][0], 0, sizeof(tile) * game.grid.x);
 }
 
+/**
+ * Checks if the tile at the specified coordinates is occupied.
+ * Returns true if occupied, false otherwise.
+ */
 static inline bool tileOccupied(coord const target)
 {
     return game.playfield[target.y][target.x].occupied;
 }
 
+/**
+ * Checks if the entire row at the specified index is occupied.
+ * Returns true if all tiles in the row are occupied, false otherwise.
+ */
 static inline bool rowOccupied(unsigned int const target)
 {
+    bool ret = true;
     for (unsigned int x = 0; x < game.grid.x; x++)
     {
         coord const checkTile = {x, target};
         if (!tileOccupied(checkTile))
         {
-            return false;
+            ret = false;
+            break;
         }
     }
-    return true;
+    return ret;
 }
 
+/**
+ * Resets the entire playfield by marking all tiles as unoccupied.
+ */
 static inline void resetPlayfield()
 {
     for (unsigned int y = 0; y < game.grid.y; y++)
@@ -194,11 +238,10 @@ static inline void resetPlayfield()
     }
 }
 
-
 /**
  * Signal handler for interrupt signal (Ctrl+C).
  */
-void interrupt_handler(int signum)
+void interuptHandler(int signum)
 {
     cleanUp();
     fprintf(stderr, "\nInterrupt signal (%d) received. Exiting...\n", signum);
@@ -206,17 +249,17 @@ void interrupt_handler(int signum)
 }
 
 /**
- * Checks if the given directory entry is an event device.
+ * Checks if the given directory entry is the event device specified by EVENT_DEV_NAME.
  */
-static int is_event_device(const struct dirent *dir)
+static int isEventDevice(const struct dirent *dir)
 {
     return strncmp(EVENT_DEV_NAME, dir->d_name, strlen(EVENT_DEV_NAME)-1) == 0;
 }
 
 /**
- * Checks if the given directory entry is a framebuffer device.
+ * Checks if the given directory entry is the framebuffer device specified by FB_DEV_NAME.
  */
-static int is_framebuffer_device(const struct dirent *dir)
+static int isFramebufferDevice(const struct dirent *dir)
 {
     return strncmp(FB_DEV_NAME, dir->d_name, strlen(FB_DEV_NAME)-1) == 0;
 }
@@ -225,26 +268,26 @@ static int is_framebuffer_device(const struct dirent *dir)
 /**
  * Opens the framebuffer device with the given name.
  */
-static int open_fbdev(const char *dev_name)
+static int openFbdev(const char *dev_name)
 {
 
-    struct dirent **namelist; // list of directory entries
-    int i, ndev;            // number of devices found
-    int fd = -1;            // file descriptor to return
+    struct dirent **namelist;   // list of directory entries
+    int i, ndev;                // number of devices found
+    int fd = -1;                // file descriptor to return
     struct fb_fix_screeninfo fix_info;  // fixed screen info structure
 
-    ndev = scandir(DEV_FB, &namelist, is_framebuffer_device, versionsort);  // scan for framebuffer devices
+    ndev = scandir(DEV_FB, &namelist, isFramebufferDevice, versionsort);  // scan for framebuffer devices
     if (ndev <= 0)
         return ndev;
 
     // iterate over all devices found
     for (i = 0; i < ndev; i++)
     {
-        char fname[PATH_MAX];     // filename buffer
+        char fname[PATH_MAX];                                                   // filename buffer
         snprintf(fname, sizeof(fname), "%s/%s", DEV_FB, namelist[i]->d_name);   // construct full path
-        fd = open(fname, O_RDWR);        // open device with read/write access
-        // if open failed, try next device
-        if (fd < 0)
+        fd = open(fname, O_RDWR);                                               // open device with read/write access
+        
+        if (fd < 0)         // if open failed, try next device
             continue;
         ioctl(fd, FBIOGET_FSCREENINFO, &fix_info); // load fixed screen info into fix_info structure
         if (strcmp(dev_name, fix_info.id) == 0)  // Check device name to match for desired device (Sense HAT FB)
@@ -262,14 +305,14 @@ static int open_fbdev(const char *dev_name)
 /**
  * Opens the event device with the given name.
  */
-static int open_evdev(const char *dev_name)
+static int openEvdev(const char *dev_name)
 {
     struct dirent **namelist;       // list of directory entries
     int i, ndev;                    // number of devices found
     int fd = -1;                    // file descriptor to return
 
     // scan for event devices, sorted by version
-    ndev = scandir(DEV_INPUT_EVENT, &namelist, is_event_device, versionsort);
+    ndev = scandir(DEV_INPUT_EVENT, &namelist, isEventDevice, versionsort);
     if (ndev <= 0)
         return ndev;    // return errormessage if no devices found
 
@@ -302,13 +345,14 @@ static int open_evdev(const char *dev_name)
 }
 
 
-// This function is called on the start of your application
-// Here you can initialize what ever you need for your task
-// return false if something fails, else true
+/**
+ * Initializes the Sense HAT by setting up the framebuffer and event device.
+ * Exits the program if initialization fails.
+ */
 void initializeSenseHat()
 {
         // Open framebuffer device
-    fbfd = open_fbdev("RPi-Sense FB"); // Open framebuffer device
+    fbfd = openFbdev("RPi-Sense FB"); // Open framebuffer device
     if (fbfd <= 0)
     {
         fprintf(stderr, "ERROR: cannot open framebuffer device. ErrorCode:\t%i\n", fbfd);
@@ -335,7 +379,7 @@ void initializeSenseHat()
     fprintf(stdout, "DEBUG: Framebuffer initialized successfully.\n");
 
     // open event device (joystick)
-    evpoll.fd = open_evdev("Raspberry Pi Sense HAT Joystick");
+    evpoll.fd = openEvdev("Raspberry Pi Sense HAT Joystick");
     if (evpoll.fd < 0)
     {
         fprintf(stderr, "ERROR: Event device not found.\n");
@@ -349,8 +393,9 @@ void initializeSenseHat()
     }
 }
 
-// This function is called when the application exits
-// Here you can free up everything that you might have opened/allocated
+/**
+ * Frees resources allocated for Sense HAT access.
+ */
 void freeSenseHat()
 {
     memset(fb, 0, 128); // Clear framebuffer (turn all pixels off (black))
@@ -366,7 +411,6 @@ void freeSenseHat()
  * Cleans up allocated resources for the game.
  * This function is called on program exit to ensure
  * that all resources are properly released.
-
  */
 void cleanUp()
 {
@@ -381,10 +425,11 @@ void cleanUp()
     free(game.playfield);
 }
 
-// This function should return the key that corresponds to the joystick press
-// KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, with the respective direction
-// and KEY_ENTER, when the the joystick is pressed
-// !!! when nothing was pressed you MUST return 0 !!!
+/**
+ * Reads the joystick input from the Sense HAT.
+ * Returns the key code corresponding to the joystick action,
+ * or 0 if no action was detected.
+ */
 int readSenseHatJoystick()
 {
     struct input_event ev[64];
@@ -421,9 +466,10 @@ int readSenseHatJoystick()
     return 0;
 }
 
-// This function should render the gamefield on the LED matrix. It is called
-// every game tick. The parameter playfieldChanged signals whether the game logic
-// has changed the playfield
+/**
+ * Renders the current state of the playfield to the Sense HAT LED matrix.
+ * Only updates the display if the playfield has changed.
+ */
 void renderSenseHatMatrix(bool const playfieldChanged)
 {
     if (playfieldChanged)
@@ -546,11 +592,12 @@ void renderConsole(bool const playfieldChanged)
 }
 
 
-
-// Below here comes the game logic. Keep in mind: You are not allowed to change how the game works!
-// that means no changes are necessary below this line! And if you choose to change something
-// keep it compatible with what was provided to you!
-
+/**
+ * Adds a new tile to the playfield at the top center position.
+ * If the position is already occupied, the function returns false,
+ * indicating that a new tile cannot be added (game over condition).
+ * Otherwise, it places the new tile and returns true.
+ */
 bool addNewTile()
 {
     game.activeTile.y = 0;
@@ -561,6 +608,10 @@ bool addNewTile()
     return true;
 }
 
+/**
+ * Moves the active tile one position to the right if possible.
+ * Returns true if the move was successful, false otherwise.
+ */
 bool moveRight()
 {
     coord const newTile = {game.activeTile.x + 1, game.activeTile.y};
@@ -574,6 +625,10 @@ bool moveRight()
     return false;
 }
 
+/**
+ * Moves the active tile one position to the left if possible.
+ * Returns true if the move was successful, false otherwise.
+ */
 bool moveLeft()
 {
     coord const newTile = {game.activeTile.x - 1, game.activeTile.y};
@@ -587,6 +642,10 @@ bool moveLeft()
     return false;
 }
 
+/**
+ * Moves the active tile one position down if possible.
+ * Returns true if the move was successful, false otherwise.
+ */
 bool moveDown()
 {
     coord const newTile = {game.activeTile.x, game.activeTile.y + 1};
@@ -600,6 +659,12 @@ bool moveDown()
     return false;
 }
 
+/**
+ * Clears the bottom row if it is fully occupied.
+ * If row is occupied, all rows above it are shifted down by one,
+ * and the top row is reset to empty.
+ * Returns true if a row was cleared, false otherwise.
+ */
 bool clearRow()
 {
     if (rowOccupied(game.grid.y - 1))
@@ -614,6 +679,10 @@ bool clearRow()
     return false;
 }
 
+/**
+ * Advances the game to the next level by incrementing the level counter
+ * and adjusting the nextGameTick value to increase game speed.
+ */
 void advanceLevel()
 {
     game.level++;
@@ -632,6 +701,10 @@ void advanceLevel()
     }
 }
 
+/**
+ * Starts a new game by resetting the game state and playfield.
+ * Initializes game parameters such as tiles, rows, score, tick, and level.
+ */
 void newGame()
 {
     game.state = ACTIVE;
@@ -643,12 +716,20 @@ void newGame()
     resetPlayfield();
 }
 
+/**
+ * Sets the game state to GAMEOVER and resets the nextGameTick to its initial value.
+ */
 void gameOver()
 {
     game.state = GAMEOVER;
     game.nextGameTick = game.initNextGameTick;
 }
 
+/**
+ * Main game logic function that processes user input and updates the game state.
+ * It handles tile movement, row clearing, tile addition, and game over conditions.
+ * Returns true if the playfield has changed, false otherwise.
+ */
 bool sTetris(int const key)
 {
     bool playfieldChanged = false;
@@ -728,15 +809,19 @@ bool sTetris(int const key)
     return playfieldChanged;
 }
 
+/**
+ * Converts a timespec structure to microseconds.
+ */
 inline unsigned long uSecFromTimespec(struct timespec const ts)
 {
     return ((ts.tv_sec * 1000000) + (ts.tv_nsec / 1000));
 }
 
+
 int main(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    (void)argc;     // Unused parameter
+    (void)argv;     // Unused parameter
 
     // Allocate the playing field structure
     game.rawPlayfield = (tile *)malloc(game.grid.x * game.grid.y * sizeof(tile));
@@ -760,8 +845,8 @@ int main(int argc, char **argv)
     tcsetattr(STDIN_FILENO, TCSANOW, &new_termios); // apply new terminal settings
 
     // Set up signal handlers for clean exit
-    signal(SIGINT, interrupt_handler);   // Ctrl+C
-    signal(SIGTERM, interrupt_handler);  // Termination signal
+    signal(SIGINT, interuptHandler);   // Ctrl+C
+    signal(SIGTERM, interuptHandler);  // Termination signal
 
     // Reset playfield to make it empty
     resetPlayfield();
@@ -801,8 +886,6 @@ int main(int argc, char **argv)
         }
         game.tick = (game.tick + 1) % game.nextGameTick;
     }
-
     cleanUp();  
-
     return EXIT_SUCCESS;
 }

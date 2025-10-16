@@ -1,81 +1,170 @@
-# STetris - Simplified Tetris Game
+# STetris - Tetris Game for Raspberry Pi Sense HAT
 
-This project contains two versions of a simplified Tetris game:
+A colorful Tetris implementation designed for the Raspberry Pi 4 with Sense HAT expansion board, featuring both hardware LED matrix display and console versions.
 
-## Versions
+## Project Structure
 
-### 1. Sense HAT Version (`stetris.c`)
-- **Target**: Raspberry Pi 4 with Sense HAT expansion board
-- **Input**: Sense HAT joystick (with keyboard fallback)
-- **Output**: 8×8 LED matrix + console display
-- **Colors**: Full RGB colors on LED matrix, ASCII characters in console
+### Game Implementations
+- **`stetris.c`** - Sense HAT version with LED matrix display and joystick input
+- **`stetris_console.c`** - Console-only version for testing and development
+- **`stetris_rpi_and_console.c`** - Hybrid version supporting both Sense HAT and keyboard input
 
-### 2. Console Version (`stetris_console.c`)  
-- **Target**: Any Linux system
-- **Input**: Keyboard arrow keys
-- **Output**: Console display only
-- **Colors**: ASCII characters representing different colors
+### Development Files
+- **`stetris_skeleton.c`** - Original skeleton code provided for the assignment
+- **`fb_test.c`** - Framebuffer testing utility for debugging LED matrix functionality
 
-## Building
+### Build System
+- **`Makefile`** - Build configuration for all targets
 
+### Example Code
+- **`example_senseHat/`** - Reference implementation copied from Raspberry Pi Sense HAT examples found online
+
+## Compilation
+
+### Build All Targets
 ```bash
-# Build both versions
-make all
+make
+```
 
-# Build only Sense HAT version
+### Indicidual Targets
+```bash
+# Sense HAT version (requires hardware)
 make stetris
 
-# Build only console version  
+# Console version (works on any Linux system)  
 make stetris_console
+
+# Hybrid version
+make stetris_rpi_and_console
+
+# Testing utility
+make fb_test
 
 # Clean build files
 make clean
 ```
 
-## Running
+## Usage
 
-### Console Version (for testing)
+### Console Version (Development/Testing)
 ```bash
 ./stetris_console
+# Controls: Arrow keys to move, Enter to exit
 ```
 
-### Sense HAT Version (on Raspberry Pi)
+### Sense HAT Version (Raspberry Pi 4)
 ```bash
 ./stetris
+# Controls: Sense HAT joystick + keyboard fallback
+# Display: 8×8 RGB LED matrix + console output
 ```
 
-## Controls
+### Framebuffer Test Utility
+```bash
+./fb_test <x> <y> <color>
+# Example: ./fb_test 3 4 red
+# Sets pixel at position (3,4) to red color
+```
 
-### Keyboard (both versions)
-- **Arrow Keys**: Move tiles left/right, drop quickly (down)
-- **Enter**: Exit game
-- **Any key**: Start new game when game over
 
-### Sense HAT Joystick (stetris only)
-- **Joystick directions**: Move tiles left/right, drop quickly (down)  
-- **Joystick press**: Exit game
-- **Any input**: Start new game when game over
+## Features
 
-## Game Features
+- **Colorful Blocks**: 6 distinct colors (red, green, blue, magenta, cyan, yellow)
+- **Progressive Difficulty**: Game speed increases with level
+- **Row Clearing**: Standard Tetris mechanics with animations
+- **Score System**: Points and statistics tracking
+- **Dual Input**: Joystick and keyboard support
+- **Signal Handling**: Clean exit with terminal restoration
+- **8×8 Playfield**: Optimized for Sense HAT LED matrix
 
-- **Colorful blocks**: Each tile gets a random color
-- **Progressive difficulty**: Game speeds up as you clear rows
-- **Score system**: Points awarded for clearing rows
-- **8×8 playfield**: Optimized for Sense HAT LED matrix
+## Hardware Requirements
 
-## Color Legend (Console)
-- `@` = Red blocks
-- `#` = Green blocks  
-- `*` = Blue blocks
-- `%` = Magenta blocks
-- `&` = Cyan blocks
-- `$` = Yellow blocks
+### Console Version
+- Any Linux system with terminal support
 
-## Technical Details
+### Sense HAT Version
+- Raspberry Pi 4 (or compatible)
+- Sense HAT expansion board properly connected
+- Linux with framebuffer and input device support
 
-Both versions share the same game logic but differ in I/O handling:
+## Game Controls
 
-- **stetris.c**: Uses Linux framebuffer (`/dev/fb*`) and input event system (`/dev/input/event*`)
-- **stetris_console.c**: Uses standard I/O for terminal-based gameplay
+| Action | Keyboard | Sense HAT Joystick |
+|--------|----------|-------------------|
+| Move Left | ← Arrow | Left |
+| Move Right | → Arrow | Right |
+| Drop Down | ↓ Arrow | Down |
+| Exit Game | Enter | - |
+| New Game | Any key (when game over) | Any direction |
+| Force Exit | Ctrl+C | Ctrl+C |
 
-The Sense HAT version gracefully falls back to keyboard input if the hardware is not available, making it testable on regular Linux systems.
+
+## Color Scheme
+
+The game uses a vibrant 6-color palette displayed as both RGB colors on the LED matrix and ASCII characters in console mode:
+
+| Color | RGB565 | Console Character |
+|-------|--------|-------------------|
+| Red | 0xF800 | @ |
+| Green | 0x07E0 | # |
+| Blue | 0x001F | * |
+| Magenta | 0xF81F | % |
+| Cyan | 0x07FF | & |
+| Yellow | 0xFFE0 | $ |
+
+## Technical Implementation
+
+### Device Detection
+- Automatic framebuffer device discovery (`/dev/fb*`)
+- Dynamic input device enumeration (`/dev/input/event*`)
+- Device identification by name matching
+
+### System Requirements
+- **Compiler**: GCC with C99 support
+- **Libraries**: Standard C library, Linux headers
+- **Permissions**: Read/write access to `/dev/fb*` and `/dev/input/*`
+- **GNU Extensions**: Requires `_GNU_SOURCE` for `scandir()` and `versionsort()`
+
+### Memory Management
+- Direct framebuffer memory mapping via `mmap()`
+- Automatic cleanup on program termination
+- Signal-safe terminal restoration
+
+
+## Troubleshooting
+
+### Common Issues
+
+**"Permission denied" errors:**
+```bash
+# Add user to input group
+sudo usermod -a -G input $USER
+# Restart session or use sudo
+```
+
+**"Device not found" errors:**
+```bash
+# Check if Sense HAT is properly connected
+ls /dev/fb* /dev/input/event*
+# Verify device names
+cat /proc/bus/input/devices | grep -A5 "Sense HAT"
+```
+
+**Terminal becomes unresponsive:**
+```bash
+# Reset terminal settings
+reset
+# Or use Ctrl+C to force exit with cleanup
+```
+
+
+## Development Notes
+
+- Game logic uses bit flags for state management (`ACTIVE`, `ROW_CLEAR`, `TILE_ADDED`)
+- Non-blocking input via `poll()` for smooth 60+ FPS gameplay
+- Terminal raw mode for direct key capture without buffering
+- Cross-platform compatibility between development (console) and target (hardware) versions
+
+---
+
+*Note: The `example_senseHat/` directory contains reference code adapted from Raspberry Pi Sense HAT examples available online.*
