@@ -3,17 +3,17 @@ CFLAGS = -Wall -Wextra -std=c99
 LDFLAGS = 
 
 # Targets
-SENSEHAT_TARGET = stetris
+SENSEHAT_TARGET = stetris_rpi
 CONSOLE_TARGET = stetris_console
 COMBINED_TARGET = stetris_rpi_and_console
 
 # Source files
-SENSEHAT_SRC = stetris.c
+SENSEHAT_SRC = stetris_rpi.c
 CONSOLE_SRC = stetris_console.c
 COMBINED_SRC = stetris_rpi_and_console.c
 
 # Build both versions
-all: $(SENSEHAT_TARGET) $(CONSOLE_TARGET) $(COMBINED_SRC)
+all: $(SENSEHAT_TARGET) $(CONSOLE_TARGET) $(COMBINED_TARGET)
 
 # Sense HAT version (for Raspberry Pi with Sense HAT)
 $(SENSEHAT_TARGET): $(SENSEHAT_SRC)

@@ -19,7 +19,6 @@
 #define FB_DEV_NAME     "fb"            // Framebuffer device name prefix
 #define DEV_INPUT_EVENT "/dev/input"    // Input event device directory (for joystick)
 #define EVENT_DEV_NAME  "event"         // Input event device name prefix (for joystick)
-#define BLOCK_COLOR     red             // Color for the blocks in the game
 
 #include <stdbool.h>                    // for bool type
 #include <linux/fb.h>                   // for framebuffer structures
@@ -78,6 +77,7 @@ typedef enum color {
 typedef struct
 {
     bool occupied;
+    color_t color;
 } tile;
 
 typedef struct
@@ -89,6 +89,7 @@ typedef struct
 typedef struct
 {
     coord const grid;                     // playfield bounds
+    color_t const blockColor[6];          // color of the blocks
     unsigned long const uSecTickTime;     // tick rate
     unsigned long const rowsPerLevel;     // speed up after clearing rows
     unsigned long const initNextGameTick; // initial value of nextGameTick
@@ -111,6 +112,7 @@ typedef struct
 
 gameConfig game = {
     .grid = {8, 8},
+    .blockColor = {red, green, blue, magenta, cyan, yellow},
     .uSecTickTime = 10000,
     .rowsPerLevel = 2,
     .initNextGameTick = 50,
@@ -157,14 +159,42 @@ void gameLoop();
 void renderSenseHatMatrix(bool const playfieldChanged);
 void renderConsole(bool const playfieldChanged);
 bool sTetris(int const key);
+char mapColorToChar(color_t color);
 
 
 /**
- * Creates a new tile at the specified coordinates by marking the tile as occupied.
+ * Maps a color_t value to its corresponding character representation.
+ * White and black are mapped to space ' '.
+ */
+static inline char mapColorToChar(color_t color)
+{
+    switch (color)
+    {
+        case red:
+            return 'R';
+        case green:
+            return 'G';
+        case blue:
+            return 'B';
+        case magenta:
+            return 'M';
+        case cyan:
+            return 'C';
+        case yellow:
+            return 'Y';
+        default:
+            return ' ';
+    }
+}
+
+
+/**
+ * Creates a new tile at the specified coordinates with a random color.
  */
 static inline void newTile(coord const target)
 {
     game.playfield[target.y][target.x].occupied = true;
+    game.playfield[target.y][target.x].color = game.blockColor[rand() % 6];
 }
 
 /**
@@ -334,7 +364,7 @@ static int openEvdev(const char *dev_name)
         ioctl(fd, EVIOCGNAME(sizeof(name)), name);
         if (strcmp(dev_name, name) == 0)
             break;  // if device name matches, break loop and keep fd
-        close(fd);
+        close(fd);  // else close device and try next
         fd = -1;
     }
     // free allocated memory for directory entries
@@ -393,19 +423,6 @@ void initializeSenseHat()
     }
 }
 
-/**
- * Frees resources allocated for Sense HAT access.
- */
-void freeSenseHat()
-{
-    memset(fb, 0, 128); // Clear framebuffer (turn all pixels off (black))
-    if (fb)
-        munmap(fb, 128); // Unmap framebuffer memory
-    if (fbfd > 0)
-        close(fbfd); // Close framebuffer file descriptor
-    if (evpoll.fd >= 0)
-        close(evpoll.fd); // Close event device file descriptor
-}
 
 /**
  * Cleans up allocated resources for the game.
@@ -420,7 +437,13 @@ void cleanUp()
     // restore terminal settings
     tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
 
-    freeSenseHat();
+    memset(fb, 0, 128); // Clear framebuffer (turn all pixels off (black))
+    if (fb)
+        munmap(fb, 128); // Unmap framebuffer memory
+    if (fbfd > 0)
+        close(fbfd); // Close framebuffer file descriptor
+    if (evpoll.fd >= 0)
+        close(evpoll.fd); // Close event device file descriptor
     free(game.rawPlayfield);
     free(game.playfield);
 }
@@ -480,7 +503,7 @@ void renderSenseHatMatrix(bool const playfieldChanged)
             {
                 if (game.playfield[y][x].occupied)
                 {
-                    fb->pixel[y][x] = BLOCK_COLOR; // Set pixel to BLOCK_COLOR if occupied
+                    fb->pixel[y][x] = game.playfield[y][x].color; // Set pixel to block color if occupied
                 }
                 else
                 {
@@ -561,7 +584,7 @@ void renderConsole(bool const playfieldChanged)
         for (unsigned int x = 0; x < game.grid.x; x++)
         {
             coord const checkTile = {x, y};
-            fprintf(stdout, "%c", (tileOccupied(checkTile)) ? '#' : ' ');
+            fprintf(stdout, "%c", (tileOccupied(checkTile)) ? mapColorToChar(game.playfield[y][x].color) : ' ');
         }
         switch (y)
         {
@@ -762,12 +785,11 @@ bool sTetris(int const key)
         // If we have reached a tick to update the game
         if (game.tick == 0)
         {
-            // We communicate the row clear and tile add over the game state
-            // clear these bits if they were set before
+            // clear previous row clear and tile added states
             game.state &= ~(ROW_CLEAR | TILE_ADDED);
 
             playfieldChanged = true;
-            // Clear row if possible
+           
             if (clearRow())
             {
                 game.state |= ROW_CLEAR;
@@ -824,8 +846,8 @@ int main(int argc, char **argv)
     (void)argv;     // Unused parameter
 
     // Allocate the playing field structure
-    game.rawPlayfield = (tile *)malloc(game.grid.x * game.grid.y * sizeof(tile));
-    game.playfield = (tile **)malloc(game.grid.y * sizeof(tile *));
+    game.rawPlayfield   = (tile *) malloc(game.grid.x * game.grid.y * sizeof(tile));
+    game.playfield      = (tile **)malloc(game.grid.y * sizeof(tile *));
     if (!game.playfield || !game.rawPlayfield)
     {
         fprintf(stderr, "ERROR: could not allocate playfield\n");
@@ -848,11 +870,8 @@ int main(int argc, char **argv)
     signal(SIGINT, interuptHandler);   // Ctrl+C
     signal(SIGTERM, interuptHandler);  // Termination signal
 
-    // Reset playfield to make it empty
     resetPlayfield();
-    // Start with gameOver
     gameOver();
-
     initializeSenseHat();
 
     // Clear console, render first time

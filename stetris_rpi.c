@@ -19,7 +19,6 @@
 #define FB_DEV_NAME     "fb"            // Framebuffer device name prefix
 #define DEV_INPUT_EVENT "/dev/input"    // Input event device directory (for joystick)
 #define EVENT_DEV_NAME  "event"         // Input event device name prefix (for joystick)
-#define BLOCK_COLOR     red             // Color for the blocks in the game
 
 #include <stdbool.h>                    // for bool type
 #include <linux/fb.h>                   // for framebuffer structures
@@ -78,6 +77,7 @@ typedef enum color {
 typedef struct
 {
     bool occupied;
+    color_t color;
 } tile;
 
 typedef struct
@@ -89,6 +89,7 @@ typedef struct
 typedef struct
 {
     coord const grid;                     // playfield bounds
+    color_t const blockColor[6];          // color of the blocks
     unsigned long const uSecTickTime;     // tick rate
     unsigned long const rowsPerLevel;     // speed up after clearing rows
     unsigned long const initNextGameTick; // initial value of nextGameTick
@@ -111,6 +112,7 @@ typedef struct
 
 gameConfig game = {
     .grid = {8, 8},
+    .blockColor = {red, green, blue, magenta, cyan, yellow},
     .uSecTickTime = 10000,
     .rowsPerLevel = 2,
     .initNextGameTick = 50,
@@ -161,6 +163,7 @@ void gameLoop();
 static inline void newTile(coord const target)
 {
     game.playfield[target.y][target.x].occupied = true;
+    game.playfield[target.y][target.x].color = game.blockColor[rand() % 6];
 }
 
 /**
@@ -389,19 +392,6 @@ void initializeSenseHat()
     }
 }
 
-/**
- * Frees resources allocated for Sense HAT access.
- */
-void freeSenseHat()
-{
-    memset(fb, 0, 128); // Clear framebuffer (turn all pixels off (black))
-    if (fb)
-        munmap(fb, 128); // Unmap framebuffer memory
-    if (fbfd > 0)
-        close(fbfd); // Close framebuffer file descriptor
-    if (evpoll.fd >= 0)
-        close(evpoll.fd); // Close event device file descriptor
-}
 
 /**
  * Cleans up allocated resources for the game.
@@ -410,7 +400,14 @@ void freeSenseHat()
  */
 void cleanUp()
 {
-    freeSenseHat();
+    memset(fb, 0, 128); // Clear framebuffer (turn all pixels off (black))
+    if (fb)
+        munmap(fb, 128); // Unmap framebuffer memory
+    if (fbfd > 0)
+        close(fbfd); // Close framebuffer file descriptor
+    if (evpoll.fd >= 0)
+        close(evpoll.fd); // Close event device file descriptor
+
     free(game.rawPlayfield);
     free(game.playfield);
 }
@@ -470,7 +467,7 @@ void renderSenseHatMatrix(bool const playfieldChanged)
             {
                 if (game.playfield[y][x].occupied)
                 {
-                    fb->pixel[y][x] = BLOCK_COLOR; // Set pixel to BLOCK_COLOR if occupied
+                    fb->pixel[y][x] = game.playfield[y][x].color; // Set pixel to block color if occupied
                 }
                 else
                 {
@@ -658,7 +655,7 @@ bool sTetris(int const key)
             game.state &= ~(ROW_CLEAR | TILE_ADDED);
 
             playfieldChanged = true;
-            // Clear row if possible
+            
             if (clearRow())
             {
                 game.state |= ROW_CLEAR;

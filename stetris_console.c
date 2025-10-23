@@ -19,7 +19,6 @@
 #define FB_DEV_NAME     "fb"            // Framebuffer device name prefix
 #define DEV_INPUT_EVENT "/dev/input"    // Input event device directory (for joystick)
 #define EVENT_DEV_NAME  "event"         // Input event device name prefix (for joystick)
-#define BLOCK_COLOR     red             // Color for the blocks in the game
 
 #include <stdbool.h>                    // for bool type
 #include <linux/fb.h>                   // for framebuffer structures
@@ -78,6 +77,7 @@ typedef enum color {
 typedef struct
 {
     bool occupied;
+    color_t color;
 } tile;
 
 typedef struct
@@ -89,6 +89,7 @@ typedef struct
 typedef struct
 {
     coord const grid;                     // playfield bounds
+    color_t const blockColor[6];          // color of the blocks
     unsigned long const uSecTickTime;     // tick rate
     unsigned long const rowsPerLevel;     // speed up after clearing rows
     unsigned long const initNextGameTick; // initial value of nextGameTick
@@ -111,6 +112,7 @@ typedef struct
 
 gameConfig game = {
     .grid = {8, 8},
+    .blockColor = {red, green, blue, magenta, cyan, yellow},
     .uSecTickTime = 10000,
     .rowsPerLevel = 2,
     .initNextGameTick = 50,
@@ -150,7 +152,32 @@ void gameTick();
 void gameLoop();
 void renderConsole(bool const playfieldChanged);
 bool sTetris(int const key);
+char mapColorToChar(color_t color);
 
+/**
+ * Maps a color_t value to a corresponding character for console rendering.
+ * Black and white are mapped to space ' '.
+ */
+char mapColorToChar(color_t color)
+{
+    switch (color) 
+    {
+        case red:
+            return 'R';
+        case green:
+            return 'G';
+        case blue:
+            return 'B';
+        case magenta:
+            return 'M';   
+        case cyan:
+            return 'C';
+        case yellow:
+            return 'Y';
+        default:
+            return ' ';
+    } 
+}
 
 /**
  * Creates a new tile at the specified coordinates by marking the tile as occupied.
@@ -158,6 +185,7 @@ bool sTetris(int const key);
 static inline void newTile(coord const target)
 {
     game.playfield[target.y][target.x].occupied = true;
+    game.playfield[target.y][target.x].color = game.blockColor[rand() % 6];
 }
 
 /**
@@ -240,7 +268,6 @@ void interuptHandler(int signum)
     fprintf(stderr, "\nInterrupt signal (%d) received. Exiting...\n", signum);
     exit(EXIT_SUCCESS);
 }
-
 
 
 /**
@@ -330,27 +357,27 @@ void renderConsole(bool const playfieldChanged)
         for (unsigned int x = 0; x < game.grid.x; x++)
         {
             coord const checkTile = {x, y};
-            fprintf(stdout, "%c", (tileOccupied(checkTile)) ? '#' : ' ');
+            fprintf(stdout, "%c", (tileOccupied(checkTile)) ? mapColorToChar(game.playfield[y][x].color) : ' ');
         }
         switch (y)
         {
-        case 0:
-            fprintf(stdout, "| Tiles: %10u\n", game.tiles);
-            break;
-        case 1:
-            fprintf(stdout, "| Rows:  %10u\n", game.rows);
-            break;
-        case 2:
-            fprintf(stdout, "| Score: %10u\n", game.score);
-            break;
-        case 4:
-            fprintf(stdout, "| Level: %10u\n", game.level);
-            break;
-        case 7:
-            fprintf(stdout, "| %17s\n", (game.state == GAMEOVER) ? "Game Over" : "");
-            break;
-        default:
-            fprintf(stdout, "|\n");
+            case 0:
+                fprintf(stdout, "| Tiles: %10u\n", game.tiles);
+                break;
+            case 1:
+                fprintf(stdout, "| Rows:  %10u\n", game.rows);
+                break;
+            case 2:
+                fprintf(stdout, "| Score: %10u\n", game.score);
+                break;
+            case 4:
+                fprintf(stdout, "| Level: %10u\n", game.level);
+                break;
+            case 7:
+                fprintf(stdout, "| %17s\n", (game.state == GAMEOVER) ? "Game Over" : "");
+                break;
+            default:
+                fprintf(stdout, "|\n");
         }
     }
     for (unsigned int x = 0; x < game.grid.x + 2; x++)
